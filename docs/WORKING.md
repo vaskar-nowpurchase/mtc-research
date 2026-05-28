@@ -1,193 +1,148 @@
-# Metal Cloud — Document Builder: Detailed Working
+# Document Builder — How It Works
 
-> POC v0.1 · MTC Research
-
-A 12-step walkthrough of the full data pipeline, the complete tech stack, key files, and a POC-vs-production replacement guide.
+POC v0.1 · MTC Research
 
 ---
 
-## Tech Stack
+## What happens when the app loads
 
-| Layer | Technology | Role |
-|---|---|---|
-| UI Framework | React 18 + TypeScript | Component rendering and state management |
-| Form Engine | `@react-form-builder/core` v9 | Schema-driven form rendering |
-| Form Components | `@react-form-builder/components-material-ui` v9 | MUI component set for FormEngine |
-| UI Components | MUI v7 (`@mui/material`) | Layout, buttons, inputs outside the form |
-| Template Engine | LiquidJS v10 | HTML template rendering with injected variables |
-| Routing | react-router-dom v6 | Page navigation |
-| Build | Vite + TypeScript | Dev server and production bundler |
-| Persistence (POC) | `localStorage` | Zero-infra storage — replaced by REST API in production |
+1. `main.tsx` renders `App.tsx`
+2. `App.tsx` sets up routing — all pages are under `BrowserRouter`
+3. The top nav hides itself on the editor and view pages
+4. First page is `CustomerListPage` — shows all available customers
 
 ---
 
-## 12-Step Pipeline Walkthrough
+## What happens when you open the editor
 
-### Step 1 — App bootstraps & seeds data
-`services/storage.ts → seedIfNeeded()`
+File: `src/pages/DocumentEditorPage.tsx`
 
-On first visit, `seedIfNeeded()` checks for the `mtc_seeded_vN` flag. If absent, it writes `SAMPLE_CUSTOMERS` with their `formSchema` JSON strings and LiquidJS templates.
-
-Bumping the version suffix forces a re-seed after schema changes — document records are preserved in a separate key.
-
----
-
-### Step 2 — Customer config loaded in editor
-`pages/DocumentEditorPage.tsx`
-
-`getCustomer(id)` retrieves the `Customer` record. In edit mode, `getDocument(docId)` retrieves saved `formData` and seeds the form.
-
-Two state slices: `initialFormData` (set once, stable `FormViewer` seed) and `formData` (live, updated on every `onChange`). FormEngine treats `initialData` as reactive — passing live state would reset the form on every keystroke.
+1. Reads `customerId` from the URL params
+2. Calls `seedIfNeeded()` — on first visit, writes sample customer data to localStorage
+3. Loads the customer record with `getCustomer(id)`
+4. If editing an existing document: loads saved `formData` from `getDocument(docId)`
+5. Sets two separate state slices:
+   - `initialFormData` — passed to `FormViewer` once, never changes again
+   - `formData` — tracks live changes, updated on every field change
+6. Runs an initial `bridgeRender()` to show the document in the preview immediately
 
 ---
 
-### Step 3 — FormEngine renders the form
-`components/FormPanel.tsx`
+## What happens when you type in the form
 
-`FormPanel` passes `customer.formSchema` to `FormViewer` via a stable `getForm()` callback. Custom components like `ApproverList` are registered into `muiView` before first render.
-
-```ts
-define(Component, 'ApproverList')
-  .props({ value: array.valued })
-  .build()
-  .model
-```
-
-The component reads its `value` prop and writes back via `field.setValue()` from `useComponentData()`.
+1. FormEngine calls `onFormDataChange` with the latest form state
+2. `handleDataChange` runs a `JSON.stringify` comparison against `lastDataRef`
+   - If the data hasn't changed: does nothing (prevents infinite re-render loop)
+   - If it changed: calls `setFormData()` with the new data
+3. `useEffect([formData])` fires because `formData` reference changed
+4. Starts a 300ms `setTimeout` debounce
+   - If you type again within 300ms, the previous timer is cancelled and a new one starts
+   - Only the last change in a burst triggers rendering
+5. After 300ms: `bridgeRender(customerId, formData)` is called
 
 ---
 
-### Step 4 — User types → `onFormDataChange` fires
-`DocumentEditorPage.tsx → handleDataChange`
+## What bridgeRender does
 
-FormEngine fires `onFormDataChange` on every field change and also during its own mount cycle. Without dedup this causes an infinite re-render loop.
+File: `src/services/bridge/index.ts`
 
-`lastDataRef` holds `JSON.stringify` of the last-seen payload. Matching strings are dropped before reaching `setState` — no re-render, loop broken.
-
----
-
-### Step 5 — `useEffect` detects change and debounces
-`DocumentEditorPage.tsx → reactive render effect`
-
-`useEffect([formData, id])` fires when `formData` reference changes. A 300 ms `setTimeout` debounce collapses rapid keystrokes.
-
-If another change arrives within 300 ms, the cleanup calls `clearTimeout` and a new timer starts. Only the last change in a burst triggers `bridgeRender`.
-
----
-
-### Step 6 — `extractFormData` normalises the state
-`services/bridge/extractor.ts`
-
-Strips `null`, `undefined`, and empty-string values. Coerces scalars to `String(v)`. Passes arrays through as-is.
-
-Arrays from custom components like `ApproverList` must not be stringified — `String([{name:'A'}])` = `'[object Object]'` would corrupt the data before it reaches the injector.
+1. Loads the customer record (to get the LiquidJS template)
+2. Calls `extractFormData()` — cleans the raw form state:
+   - Removes null, undefined, empty strings
+   - Converts scalars to strings
+   - Passes arrays through unchanged
+3. Looks up the customer's injector in the `INJECTORS` map
+4. Calls the injector with the cleaned data:
+   - Maps form field keys to the variable names the template uses
+   - Assembles numbered row fields into arrays (e.g. `s1_uts…s5_uts` → `testSamples[]`)
+5. Calls `renderTemplate(template, data)` — LiquidJS renders the HTML
+6. Returns the rendered HTML string
 
 ---
 
-### Step 7 — `INJECTORS` registry routes to customer injector
-`services/bridge/index.ts → INJECTORS`
+## What happens in the preview
 
-`bridgeRender()` looks up the customer ID in the `INJECTORS` map. No injector registered = extracted data passed directly to LiquidJS as a safe fallback.
+File: `src/components/TemplatePreview.tsx`
 
-Adding a customer: one injector file + one entry in `INJECTORS`. Nothing else changes.
-
----
-
-### Step 8 — Customer injector builds template variables
-`services/bridge/injectors/[customer]Injector.ts`
-
-Maps extracted form field keys to the variable names used in the LiquidJS template. Assembles repeating arrays from numbered slots or reads pre-built arrays.
-
-- **Fixed-slot pattern:** `item1_desc…item8_desc` mapped to `inspectionItems[]`
-- **Pre-built array:** `data['approvers']` read directly from the `ApproverList` widget
+- The rendered HTML string is passed as a prop
+- An iframe is used so the certificate's CSS is isolated from the app's CSS
+- First render: `contentDocument.write(fullHtml)` — writes the full document including `<head>` and styles
+- Every render after: `doc.body.innerHTML = extractBody(renderedHtml)` — only swaps the body content
+- This means styles are loaded once and the preview updates in-place with no white flash
 
 ---
 
-### Step 9 — LiquidJS renders the template
-`services/liquid.ts → renderTemplate()`
+## What happens when you save
 
-Singleton engine with `strictVariables:false` renders the HTML template with the injected data. Missing variables default to empty — the preview always renders on partial input.
+1. `handleSave()` runs `bridgeRender()` one more time to get a fresh snapshot
+2. If creating: `createDocument()` saves `{ customerId, formData, renderedHtml, title }` to localStorage, then navigates to the edit URL
+3. If editing: `updateDocument()` updates the record in localStorage
+4. Save status shows "✓ Saved" for 2.5 seconds
 
-Templates use standard Liquid:
-```liquid
-{{ inspector | default: '—' }}
-{% for a in approvers %}...{% endfor %}
-{{ forloop.index }}   {# 1-based row numbers #}
+---
+
+## What happens on the View page
+
+File: `src/pages/DocumentViewPage.tsx`
+
+1. Loads the saved `formData` from localStorage
+2. Runs it through the same `bridgeRender()` pipeline
+3. Renders the output in a full-screen iframe
+4. Print button calls `iframe.contentWindow.print()` — the template's `@media print` CSS handles layout
+
+---
+
+## How the form schema works
+
+- Each customer has a `formSchema` — a JSON string that `FormEngine` reads
+- The schema defines fields, layout (rows, stacks), labels, placeholders, types
+- FormEngine renders MUI components from this JSON — no JSX needed
+- Custom components (like `ApproverList`) are registered with `muiView.define()` before first render
+
+Example field in the schema:
+```json
+{
+  "key": "customerName",
+  "type": "MuiTextField",
+  "props": {
+    "label": { "value": "Customer Name" },
+    "fullWidth": { "value": true },
+    "size": { "value": "small" }
+  }
+}
 ```
 
 ---
 
-### Step 10 — Iframe preview updates without flash
-`components/TemplatePreview.tsx`
+## How the ApproverList widget works
 
-- **First render:** `contentDocument.write(fullHtml)` initialises `<head>` and styles.
-- **All subsequent renders:** `doc.body.innerHTML = extracted body content only`.
+File: `src/components/ApproverListWidget.tsx`
 
-Since styles are in `<head>` from the first write, re-renders are in-place with no blank flash — critical for a smooth live-editing experience.
-
----
-
-### Step 11 — User saves the document
-`pages/DocumentEditorPage.tsx → handleSave`
-
-`saveDocument()` persists `{ customerId, formData, savedAt }` to LocalStorage under the document ID. In production this becomes a `PUT /documents/:id` API call — only `storage.ts` changes.
+- A custom React component that renders a dynamic list of `{ name, role }` rows
+- Registered into FormEngine via `define()` + `muiView.define()`
+- Reads its value from the `value` prop
+- Writes changes back via `field.setValue()` from `useComponentData()`
+- The array flows through `onFormDataChange` like any other field
+- In the injector, `data['approvers']` is read directly as a pre-built array
 
 ---
 
-### Step 12 — Document view / print
-`pages/DocumentViewPage.tsx`
+## Key files at a glance
 
-Loads the saved `formData`, runs it through the same bridge pipeline, and renders the output in a full-screen iframe. The print button triggers `iframe.contentWindow.print()` — the certificate CSS handles `@media print` layout.
-
----
-
-## Key Files
-
-### Core
-
-| File | Role |
+| File | What it does |
 |---|---|
-| `src/types/index.ts` | `Customer`, `DocumentRecord`, `CustomerFeatures` types |
-| `src/services/storage.ts` | LocalStorage CRUD + seed logic (POC only) |
+| `src/types/index.ts` | Type definitions: `Customer`, `DocumentRecord`, `CustomerFeatures` |
+| `src/services/storage.ts` | All localStorage reads/writes — swap this for API calls in production |
 | `src/services/liquid.ts` | LiquidJS singleton + `renderTemplate()` |
-| `src/data/customers.ts` | `SAMPLE_CUSTOMERS` — `formSchema` + template per customer |
-
-### Bridge
-
-| File | Role |
-|---|---|
+| `src/data/customers.ts` | Hardcoded sample customer schemas and templates |
 | `src/services/bridge/index.ts` | `bridgeRender()` + `INJECTORS` registry |
-| `src/services/bridge/extractor.ts` | Normalises raw FormEngine state |
-| `.../vishwakarmaInjector.ts` | MTC field mapping + `testSamples[]` assembly |
-| `.../abcCastingsInjector.ts` | PIR field mapping + `inspectionItems[]` + `approvers[]` |
-
-### Components
-
-| File | Role |
-|---|---|
-| `src/components/FormPanel.tsx` | `FormViewer` wrapper — stable `getForm`, custom component registration |
-| `src/components/TemplatePreview.tsx` | Iframe with first-write / body-patch strategy |
-| `src/components/ApproverListWidget.tsx` | Custom FormEngine component registered via `define()` |
-
-### Pages
-
-| File | Role |
-|---|---|
-| `src/pages/DocumentEditorPage.tsx` | Split-pane editor — state, debounce, dedup, resize, save |
-| `src/pages/DocumentListPage.tsx` | Per-customer document list |
-| `src/pages/DocumentViewPage.tsx` | Full-screen rendered certificate view |
-| `src/pages/CustomerListPage.tsx` | Customer selection grid |
-
----
-
-## POC → Production Replacement Guide
-
-| POC piece | Production replacement | Scope of change |
-|---|---|---|
-| `localStorage` in `storage.ts` | REST API calls (`fetch`/`axios`) | `storage.ts` only |
-| `SAMPLE_CUSTOMERS` in `data/customers.ts` | `GET /customers` API endpoint | `data/customers.ts` + `storage.ts` |
-| Form schema stored in customer object | `GET /customers/:id/schema` | `storage.ts` + seed logic removed |
-| LiquidJS template stored in customer object | `GET /customers/:id/template` | `storage.ts` + seed logic removed |
-| LiquidJS rendered client-side | Server-side render endpoint | `services/liquid.ts` → API call |
-| No auth | JWT / session auth | New auth layer, route guards |
-| No versioning | Document version history | `DocumentRecord` schema extension |
+| `src/services/bridge/extractor.ts` | Cleans raw FormEngine state |
+| `src/services/bridge/injectors/vishwakarmaInjector.ts` | Field mapping for Vishwakarma MTC |
+| `src/services/bridge/injectors/abcCastingsInjector.ts` | Field mapping for ABC Castings PIR |
+| `src/components/FormPanel.tsx` | FormViewer wrapper |
+| `src/components/TemplatePreview.tsx` | Iframe preview with body-patch strategy |
+| `src/components/ApproverListWidget.tsx` | Dynamic approver rows widget |
+| `src/pages/DocumentEditorPage.tsx` | Main editor — state, debounce, dedup, save |
+| `src/pages/DocumentListPage.tsx` | List of saved documents for a customer |
+| `src/pages/DocumentViewPage.tsx` | Full-screen view + print |
+| `src/pages/CustomerListPage.tsx` | Customer selection screen |
