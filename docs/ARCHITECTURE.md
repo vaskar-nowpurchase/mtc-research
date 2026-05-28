@@ -6,7 +6,7 @@ POC v0.1 · MTC Research
 
 ## What this is
 
-A tool to generate industrial quality documents (like Material Test Certificates) for different customers — without writing new React code for each customer.
+A POC that shows how new MTC requests can be implemented with ease and minimal frontend code.
 
 Each customer has two things:
 1. A **form schema** (JSON) — built using FormEngine, defines what fields appear in the form
@@ -89,3 +89,24 @@ User types
 ```
 
 ---
+
+
+## Pros
+
+1. **MTC creation and updates become trivial** — Adding or modifying a certificate type no longer requires changing multiple React components. It becomes a data operation — update the form schema and the template on the backend, and the editor picks it up at runtime.
+
+2. **Frontend becomes genuinely lightweight** — The frontend fetches both the form schema and the HTML template from the server at runtime. It ships zero customer-specific form code or template markup — it is a pure rendering shell. New customers and document types happen on the backend without a frontend deployment.
+
+3. **Devs can build forms without touching UI code** — FormEngine's JSON schema is composable. A developer can author a complete, multi-section MUI form entirely in JSON — no JSX, no component files, no stylesheet.
+
+4. **Templates live where they belong — the backend** — Storing LiquidJS templates server-side means a single source of truth for every certificate layout. Version control, access control, and change history all happen on the backend.
+
+---
+
+## Cons
+
+1. **Still not self-serve for non-developers** — A non-technical user cannot independently build a complete MTC from scratch. Authoring a valid FormEngine schema and a correctly structured LiquidJS template still requires developer knowledge. This system reduces developer involvement per customer but does not eliminate it.
+
+2. **Template authoring moves to the backend, not away from devs** — Templates are no longer hardcoded in the frontend, but they still need to be written, tested, and deployed by someone with technical skills. The problem shifts rather than disappears.
+
+3. **Complex templates still need custom injector code** — Simple, structurally similar certificates can use a generic common injector. But certificates with unusual data structures, computed fields, or non-standard repeating sections still require a developer to write a customer-specific injector. The more bespoke the certificate, the more code is still needed.
